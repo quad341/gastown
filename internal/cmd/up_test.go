@@ -212,6 +212,45 @@ func TestWorkerPoolLimitsConcurrency(t *testing.T) {
 // Verifies that gt up waits for Dolt server readiness before starting witnesses.
 // =============================================================================
 
+// =============================================================================
+// recoverOrphanedBeads tests (gas-udp)
+// Verifies that gt up detects and recovers orphaned hooked beads after crash.
+// =============================================================================
+
+func TestRecoverOrphanedBeads_NoRigs(t *testing.T) {
+	townRoot := t.TempDir()
+	services := recoverOrphanedBeads(townRoot, []string{}, make(map[string]*rig.Rig))
+	if len(services) != 0 {
+		t.Errorf("expected no services, got %d", len(services))
+	}
+}
+
+func TestRecoverOrphanedBeads_SkipsUnloadedRigs(t *testing.T) {
+	townRoot := t.TempDir()
+	// Rig "badrig" is in the list but not in prefetchedRigs — should be skipped.
+	services := recoverOrphanedBeads(townRoot, []string{"badrig"}, make(map[string]*rig.Rig))
+	if len(services) != 0 {
+		t.Errorf("expected no services for unloaded rig, got %d", len(services))
+	}
+}
+
+func TestRecoverOrphanedBeads_NoOrphansCleanRig(t *testing.T) {
+	// Set up a rig directory with no beads — should produce no services.
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, "polecats"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{Path: rigPath}
+	prefetched := map[string]*rig.Rig{rigName: r}
+	services := recoverOrphanedBeads(townRoot, []string{rigName}, prefetched)
+	if len(services) != 0 {
+		t.Errorf("expected no services for clean rig, got %d", len(services))
+	}
+}
+
 func TestWaitForDoltReady_NoServerMode(t *testing.T) {
 	// When no server mode metadata exists, waitForDoltReady should not block.
 	townRoot := t.TempDir()
