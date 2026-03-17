@@ -1513,9 +1513,9 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// Revalidate session state under the polecat lock. A prior dispatcher may
 	// have observed this polecat as idle, but by the time reuse begins the tmux
 	// session may still be alive or may have revived.
+	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
 	if running, stale := m.polecatSessionState(name); running {
 		if stale {
-			sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
 			if err := m.tmux.KillSessionWithProcesses(sessionName); err != nil {
 				return nil, fmt.Errorf("killing stale session %s: %w", sessionName, err)
 			}
@@ -1523,6 +1523,13 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 			return nil, ErrSessionRunning
 		}
 	}
+
+	// Remove old heartbeat file to prevent stale-detection false positives.
+	// Without this, the new session inherits the old heartbeat (which is stale),
+	// causing polecatSessionState to report the session as stale until the new
+	// agent writes its first heartbeat — making gt polecat list show "idle".
+	townRoot := filepath.Dir(m.rig.Path)
+	RemoveSessionHeartbeat(townRoot, sessionName)
 
 	// Get worktree path (must already exist for reuse)
 	clonePath := m.clonePath(name)
@@ -2092,16 +2099,31 @@ func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
 	agentID := m.agentBeadID(name)
 	_, fields, agentErr := m.beads.GetAgentBead(agentID)
 	if agentErr == nil && fields != nil && fields.HookBead != "" {
-		if hookIssue, err := m.beads.Show(fields.HookBead); err == nil &&
-			isCurrentHookedIssueForAssignee(hookIssue, assignee) {
-			return &Polecat{
-				Name:      name,
-				Rig:       m.rig.Name,
-				State:     StateWorking,
-				ClonePath: clonePath,
-				Branch:    branchName,
-				Issue:     fields.HookBead,
-			}, nil
+		if hookIssue, err := m.beads.Show(fields.HookBead); err == nil {
+			if isCurrentHookedIssueForAssignee(hookIssue, assignee) {
+				return &Polecat{
+					Name:      name,
+					Rig:       m.rig.Name,
+					State:     StateWorking,
+					ClonePath: clonePath,
+					Branch:    branchName,
+					Issue:     fields.HookBead,
+				}, nil
+			}
+			// Relaxed fallback: the bead exists but assignee/status don't match
+			// (cross-rig sling timing, or bead status changed). If the tmux session
+			// is running, trust the agent bead's hook_bead as the issue — the agent
+			// bead was set by ReuseIdlePolecat/Add at dispatch time.
+			if running, _ := m.polecatSessionState(name); running {
+				return &Polecat{
+					Name:      name,
+					Rig:       m.rig.Name,
+					State:     StateWorking,
+					ClonePath: clonePath,
+					Branch:    branchName,
+					Issue:     fields.HookBead,
+				}, nil
+			}
 		}
 	}
 
