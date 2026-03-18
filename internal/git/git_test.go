@@ -1692,6 +1692,60 @@ func TestCleanExcludingRuntime(t *testing.T) {
 	}
 }
 
+func TestNonRuntimeFiles(t *testing.T) {
+	tests := []struct {
+		name string
+		s    UncommittedWorkStatus
+		want []string
+	}{
+		{
+			name: "only runtime artifacts returns empty",
+			s: UncommittedWorkStatus{
+				HasUncommittedChanges: true,
+				UntrackedFiles:        []string{".claude/", ".runtime/state.json"},
+			},
+			want: nil,
+		},
+		{
+			name: "real code changes returned",
+			s: UncommittedWorkStatus{
+				HasUncommittedChanges: true,
+				ModifiedFiles:         []string{"src/main.go", "internal/cmd/done.go"},
+			},
+			want: []string{"src/main.go", "internal/cmd/done.go"},
+		},
+		{
+			name: "filters runtime from mix",
+			s: UncommittedWorkStatus{
+				HasUncommittedChanges: true,
+				UntrackedFiles:        []string{".claude/settings.json", "new_file.go"},
+				ModifiedFiles:         []string{".beads/db", "src/main.go"},
+			},
+			want: []string{"src/main.go", "new_file.go"},
+		},
+		{
+			name: "clean status returns empty",
+			s:    UncommittedWorkStatus{},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.s.NonRuntimeFiles()
+			if len(got) != len(tt.want) {
+				t.Errorf("NonRuntimeFiles() = %v, want %v", got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("NonRuntimeFiles()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestCheckBranchContamination(t *testing.T) {
 	// Create a repo with main and a feature branch that diverges.
 	dir := initTestRepo(t) // has initial commit on default branch

@@ -363,7 +363,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			return fmt.Errorf("cannot complete: working directory not available (worktree deleted?)\nUse --status DEFERRED to exit without completing")
 		}
 
-		// Block if there are uncommitted changes (would be lost on completion).
+		// Auto-commit if there are uncommitted changes (gas-c2h: prevent lost work).
 		// Runtime artifacts (.claude/, .beads/, .runtime/, __pycache__/) are
 		// excluded — these are toolchain-managed and normally gitignored.
 		// Without this filter, gt done fails on virtually every polecat because
@@ -373,7 +373,30 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			return fmt.Errorf("checking git status: %w", err)
 		}
 		if workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
-			return fmt.Errorf("cannot complete: uncommitted changes would be lost\nCommit your changes first, or use --status DEFERRED to exit without completing\nUncommitted: %s", workStatus.String())
+			// Auto-commit non-runtime files instead of blocking.
+			// Polecats frequently exit without committing, losing useful work.
+			// Stage only non-runtime files to avoid committing toolchain artifacts.
+			nonRuntimeFiles := workStatus.NonRuntimeFiles()
+			if len(nonRuntimeFiles) > 0 {
+				fmt.Printf("%s Auto-committing %d uncommitted file(s) to prevent work loss...\n",
+					style.Bold.Render("→"), len(nonRuntimeFiles))
+				for _, f := range nonRuntimeFiles {
+					fmt.Printf("  %s\n", f)
+				}
+				if addErr := g.Add(nonRuntimeFiles...); addErr != nil {
+					return fmt.Errorf("auto-commit: staging files failed: %w\nUncommitted: %s", addErr, workStatus.String())
+				}
+				autoMsg := fmt.Sprintf("chore: auto-commit uncommitted work on exit (%s)", issueID)
+				if issueID == "" {
+					autoMsg = "chore: auto-commit uncommitted work on exit"
+				}
+				if commitErr := g.Commit(autoMsg); commitErr != nil {
+					return fmt.Errorf("auto-commit failed: %w\nUncommitted: %s", commitErr, workStatus.String())
+				}
+				fmt.Printf("%s Auto-committed uncommitted changes\n", style.Bold.Render("✓"))
+				// Update cleanup status since we just committed
+				doneCleanupStatus = "unpushed"
+			}
 		}
 
 		// Check if branch has commits ahead of origin/default
