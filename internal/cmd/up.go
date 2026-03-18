@@ -997,6 +997,7 @@ func recoverOrphanedBeads(townRoot string, rigs []string, prefetchedRigs map[str
 
 	for _, rigName := range rigs {
 		if _, ok := prefetchedRigs[rigName]; !ok {
+			fmt.Fprintf(os.Stderr, "[orphan-recovery] skipping rig %s (failed to load)\n", rigName)
 			continue // Rig failed to load — skip
 		}
 
