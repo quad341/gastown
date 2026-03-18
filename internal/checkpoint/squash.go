@@ -99,7 +99,9 @@ func listCommitMessages(workDir, baseRef string) ([]string, error) {
 		return nil, err
 	}
 
-	cmd := exec.Command("git", "log", "--format=%B---COMMIT-SEP---", mergeBase+"..HEAD")
+	// Use null-byte separator (%x00) instead of a text marker to avoid
+	// collision with commit messages that might contain the separator string.
+	cmd := exec.Command("git", "log", "--format=%B%x00", mergeBase+"..HEAD")
 	cmd.Dir = workDir
 	out, err := cmd.Output()
 	if err != nil {
@@ -107,7 +109,7 @@ func listCommitMessages(workDir, baseRef string) ([]string, error) {
 	}
 
 	var messages []string
-	for _, msg := range strings.Split(string(out), "---COMMIT-SEP---") {
+	for _, msg := range strings.Split(string(out), "\x00") {
 		msg = strings.TrimSpace(msg)
 		if msg != "" {
 			messages = append(messages, msg)
