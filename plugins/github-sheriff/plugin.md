@@ -5,7 +5,7 @@ version = 1
 
 [gate]
 type = "cooldown"
-duration = "2h"
+duration = "5m"
 
 [tracking]
 labels = ["plugin:github-sheriff", "category:ci-monitoring"]
