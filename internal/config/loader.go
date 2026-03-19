@@ -1838,6 +1838,31 @@ func fillRuntimeDefaults(rc *RuntimeConfig) *RuntimeConfig {
 		}
 	}
 
+	// Auto-fill Session defaults from preset when not explicitly set.
+	// Custom agents (e.g., "claude-opus" with Command:"claude") inherit
+	// SessionIDEnv/ConfigDirEnv from the matched preset, enabling session
+	// resume and GT_SESSION_ID_ENV propagation in handoffs.
+	if result.Session == nil && preset != nil && (preset.SessionIDEnv != "" || preset.ConfigDirEnv != "") {
+		result.Session = &RuntimeSessionConfig{
+			SessionIDEnv: preset.SessionIDEnv,
+			ConfigDirEnv: preset.ConfigDirEnv,
+		}
+	}
+
+	// Auto-fill Tmux defaults from preset for process detection and readiness.
+	// Custom agents matching a known preset by command (e.g., "claude-opus" →
+	// claude preset) get ProcessNames and ReadyPromptPrefix needed for
+	// WaitForRuntimeReady to detect agent startup correctly.
+	if result.Tmux == nil && preset != nil && (len(preset.ProcessNames) > 0 || preset.ReadyPromptPrefix != "" || preset.ReadyDelayMs > 0) {
+		result.Tmux = &RuntimeTmuxConfig{
+			ReadyPromptPrefix: preset.ReadyPromptPrefix,
+			ReadyDelayMs:      preset.ReadyDelayMs,
+		}
+		if len(preset.ProcessNames) > 0 {
+			result.Tmux.ProcessNames = append([]string(nil), preset.ProcessNames...)
+		}
+	}
+
 	// Auto-fill Env defaults from preset.
 	if preset != nil && len(preset.Env) > 0 {
 		if result.Env == nil {
