@@ -73,6 +73,12 @@ type TownSettings struct {
 	// Example: {"bob": "codex", "alice": "claude"}
 	CrewAgents map[string]string `json:"crew_agents,omitempty"`
 
+	// PolecatAgents maps individual polecat names to agent aliases at the town level.
+	// This allows town-wide per-polecat agent assignment without modifying each rig's config.
+	// Resolution: --agent flag > rig PolecatAgents > town PolecatAgents > role agents > defaults.
+	// Example: {"furiosa": "claude-opus", "nux": "claude-sonnet"}
+	PolecatAgents map[string]string `json:"polecat_agents,omitempty"`
+
 	// AgentEmailDomain is the domain used for agent git identity emails.
 	// Agent addresses like "gastown/crew/jack" become "gastown.crew.jack@{domain}".
 	// Default: "gastown.local"
@@ -651,6 +657,12 @@ type RigSettings struct {
 	// Takes precedence over RoleAgents["crew"] but is overridden by explicit --agent flags.
 	// Example: {"denali": "codex", "glacier": "gemini"}
 	WorkerAgents map[string]string `json:"worker_agents,omitempty"`
+
+	// PolecatAgents maps individual polecat names to agent aliases.
+	// Allows per-polecat agent selection, overriding RoleAgents["polecat"].
+	// Takes precedence over RoleAgents["polecat"] but is overridden by explicit --agent flags.
+	// Example: {"furiosa": "claude-opus", "nux": "claude-sonnet"}
+	PolecatAgents map[string]string `json:"polecat_agents,omitempty"`
 }
 
 // CrewConfig represents crew workspace settings for a rig.

@@ -1389,6 +1389,57 @@ func ResolveWorkerAgentConfig(workerName, townRoot, rigPath string) *RuntimeConf
 	return withRoleSettingsFlag(rc, "crew", rigPath)
 }
 
+// ResolvePolecatAgentConfig resolves agent config for a specific polecat.
+// Resolution priority:
+//  1. Rig's PolecatAgents[polecatName]
+//  2. Town's PolecatAgents[polecatName]
+//  3. Fall back to role-based resolution for "polecat" (which defaults to sonnet)
+func ResolvePolecatAgentConfig(polecatName, townRoot, rigPath string) *RuntimeConfig {
+	resolveConfigMu.Lock()
+	defer resolveConfigMu.Unlock()
+
+	// Tier 1: rig's per-polecat override
+	if polecatName != "" && rigPath != "" {
+		if rigSettings, err := LoadRigSettings(RigSettingsPath(rigPath)); err == nil && rigSettings != nil {
+			if agentName, ok := rigSettings.PolecatAgents[polecatName]; ok && agentName != "" {
+				townSettings, err := LoadOrCreateTownSettings(TownSettingsPath(townRoot))
+				if err != nil {
+					townSettings = NewTownSettings()
+				}
+				_ = LoadAgentRegistry(DefaultAgentRegistryPath(townRoot))
+				_ = LoadRigAgentRegistry(RigAgentRegistryPath(rigPath))
+				if rc := tryResolveNamedAgent(agentName, fmt.Sprintf("polecat_agents[%s]", polecatName), townSettings, rigSettings); rc != nil {
+					return withRoleSettingsFlag(rc, "polecat", rigPath)
+				}
+			}
+		}
+	}
+
+	// Tier 2: town's per-polecat override
+	if polecatName != "" && townRoot != "" {
+		townSettings, err := LoadOrCreateTownSettings(TownSettingsPath(townRoot))
+		if err == nil && townSettings != nil {
+			if agentName, ok := townSettings.PolecatAgents[polecatName]; ok && agentName != "" {
+				var rigSettings *RigSettings
+				if rigPath != "" {
+					rigSettings, _ = LoadRigSettings(RigSettingsPath(rigPath))
+				}
+				_ = LoadAgentRegistry(DefaultAgentRegistryPath(townRoot))
+				if rigPath != "" {
+					_ = LoadRigAgentRegistry(RigAgentRegistryPath(rigPath))
+				}
+				if rc := tryResolveNamedAgent(agentName, fmt.Sprintf("polecat_agents[%s]", polecatName), townSettings, rigSettings); rc != nil {
+					return withRoleSettingsFlag(rc, "polecat", rigPath)
+				}
+			}
+		}
+	}
+
+	// Tier 3: fall back to polecat role resolution (already holds lock; use core function)
+	rc := resolveRoleAgentConfigCore("polecat", townRoot, rigPath)
+	return withRoleSettingsFlag(rc, "polecat", rigPath)
+}
+
 // IsResolvedAgentClaude returns true if the RuntimeConfig represents a Claude agent.
 // Exported for use in witness/daemon code that needs to skip hardcoded
 // Claude start commands when a non-Claude agent is configured.
@@ -1545,6 +1596,32 @@ func hasExplicitNonClaudeOverride(role string, townSettings *TownSettings, rigSe
 	return false
 }
 
+// hasExplicitRigAgent returns true if the rig has an explicit agent configuration
+// via the deprecated Runtime field or the Agent field. This indicates the rig
+// has custom agent config that should be respected over role defaults.
+func hasExplicitRigAgent(rigSettings *RigSettings) bool {
+	if rigSettings == nil {
+		return false
+	}
+	return rigSettings.Runtime != nil || rigSettings.Agent != ""
+}
+
+// hasExplicitRoleAgent returns true if role_agents[role] is explicitly set
+// in either rig or town settings (regardless of whether it's Claude or not).
+func hasExplicitRoleAgent(role string, townSettings *TownSettings, rigSettings *RigSettings) bool {
+	if rigSettings != nil && rigSettings.RoleAgents != nil {
+		if agentName, ok := rigSettings.RoleAgents[role]; ok && agentName != "" {
+			return true
+		}
+	}
+	if townSettings != nil && townSettings.RoleAgents != nil {
+		if agentName, ok := townSettings.RoleAgents[role]; ok && agentName != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func resolveRoleAgentConfigCore(role, townRoot, rigPath string) *RuntimeConfig {
 	// Load rig settings (may be nil for town-level roles like mayor/deacon)
 	var rigSettings *RigSettings
@@ -1575,6 +1652,22 @@ func resolveRoleAgentConfigCore(role, townRoot, rigPath string) *RuntimeConfig {
 			// Fall through to normal resolution below
 		} else {
 			return claudeHaikuPreset()
+		}
+	}
+
+	// Polecats default to Sonnet (well-scoped implementation tasks don't need Opus),
+	// but respect explicit overrides (RoleAgents["polecat"], non-Claude agents,
+	// rig-level Runtime/Agent settings, etc.).
+	if role == "polecat" {
+		if hasExplicitNonClaudeOverride(role, townSettings, rigSettings) {
+			// Non-Claude agent configured — fall through to normal resolution
+		} else if hasExplicitRoleAgent(role, townSettings, rigSettings) {
+			// Explicit role_agents["polecat"] set — fall through to normal resolution
+		} else if hasExplicitRigAgent(rigSettings) {
+			// Rig has explicit Runtime or Agent config — fall through to honor it
+		} else {
+			// No explicit overrides — use Sonnet default for polecats
+			return claudeSonnetPreset()
 		}
 	}
 
@@ -2094,6 +2187,9 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) stri
 		if role == "crew" && envVars["GT_CREW"] != "" {
 			// Per-worker agent resolution: check worker_agents before role_agents
 			rc = ResolveWorkerAgentConfig(envVars["GT_CREW"], townRoot, rigPath)
+		} else if role == "polecat" && envVars["GT_POLECAT"] != "" {
+			// Per-polecat agent resolution: check polecat_agents before role_agents
+			rc = ResolvePolecatAgentConfig(envVars["GT_POLECAT"], townRoot, rigPath)
 		} else if role != "" {
 			// Use role-based agent resolution for per-role model selection
 			rc = ResolveRoleAgentConfig(role, townRoot, rigPath)
@@ -2268,6 +2364,9 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 		} else if role == "crew" && envVars["GT_CREW"] != "" {
 			// Per-worker agent resolution: check worker_agents before role_agents
 			rc = ResolveWorkerAgentConfig(envVars["GT_CREW"], townRoot, rigPath)
+		} else if role == "polecat" && envVars["GT_POLECAT"] != "" {
+			// Per-polecat agent resolution: check polecat_agents before role_agents
+			rc = ResolvePolecatAgentConfig(envVars["GT_POLECAT"], townRoot, rigPath)
 		} else if role != "" {
 			// No override, use role-based agent resolution
 			rc = ResolveRoleAgentConfig(role, townRoot, rigPath)
