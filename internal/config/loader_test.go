@@ -1981,6 +1981,155 @@ func TestResolveWorkerAgentConfig_TownCrewAgents(t *testing.T) {
 	})
 }
 
+func TestPolecatDefaultsToSonnet(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+
+	// Empty rig settings — no overrides
+	settings := NewRigSettings()
+	if err := SaveRigSettings(RigSettingsPath(rigPath), settings); err != nil {
+		t.Fatalf("saving settings: %v", err)
+	}
+
+	rc := ResolveRoleAgentConfig("polecat", townRoot, rigPath)
+	if !isClaudeCommand(rc.Command) {
+		t.Errorf("expected claude command, got %q", rc.Command)
+	}
+
+	cmd := rc.BuildCommand()
+	if !strings.Contains(cmd, "--model sonnet") {
+		t.Errorf("expected --model sonnet in polecat default, got %q", cmd)
+	}
+}
+
+func TestPolecatDefaultSonnet_RespectsRoleAgentsOverride(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+
+	// Set role_agents["polecat"] = "claude" (which means default/opus)
+	settings := NewRigSettings()
+	settings.RoleAgents = map[string]string{"polecat": "claude"}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), settings); err != nil {
+		t.Fatalf("saving settings: %v", err)
+	}
+
+	rc := ResolveRoleAgentConfig("polecat", townRoot, rigPath)
+	cmd := rc.BuildCommand()
+	// Should NOT have --model sonnet since role_agents is explicitly set
+	if strings.Contains(cmd, "--model sonnet") {
+		t.Errorf("role_agents override should suppress sonnet default, got %q", cmd)
+	}
+}
+
+func TestResolvePolecatAgentConfig_PerPolecatOverride(t *testing.T) {
+	// Cannot use t.Parallel — uses t.Setenv
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+
+	// Create a fake codex binary so ValidateAgentConfig passes
+	binDir := t.TempDir()
+	writeAgentStub(t, binDir, "codex")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	settings := NewRigSettings()
+	settings.PolecatAgents = map[string]string{"furiosa": "codex"}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), settings); err != nil {
+		t.Fatalf("saving settings: %v", err)
+	}
+
+	// furiosa should get codex
+	rc := ResolvePolecatAgentConfig("furiosa", townRoot, rigPath)
+	if rc.Provider != "codex" && !strings.Contains(rc.Command, "codex") {
+		t.Errorf("expected codex for polecat furiosa, got provider=%q command=%q", rc.Provider, rc.Command)
+	}
+
+	// nux (not in polecat_agents) should fall back to sonnet default
+	rc2 := ResolvePolecatAgentConfig("nux", townRoot, rigPath)
+	cmd := rc2.BuildCommand()
+	if !strings.Contains(cmd, "--model sonnet") {
+		t.Errorf("expected --model sonnet fallback for nux, got %q", cmd)
+	}
+}
+
+func TestResolvePolecatAgentConfig_TownPolecatAgents(t *testing.T) {
+	// Cannot use t.Parallel — uses t.Setenv
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+
+	// Create a fake codex binary
+	binDir := t.TempDir()
+	writeAgentStub(t, binDir, "codex")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Town-level polecat_agents
+	townSettings := NewTownSettings()
+	townSettings.PolecatAgents = map[string]string{"furiosa": "codex"}
+	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("saving town settings: %v", err)
+	}
+
+	rigSettings := NewRigSettings()
+	if err := SaveRigSettings(RigSettingsPath(rigPath), rigSettings); err != nil {
+		t.Fatalf("saving rig settings: %v", err)
+	}
+
+	rc := ResolvePolecatAgentConfig("furiosa", townRoot, rigPath)
+	if rc.Provider != "codex" && !strings.Contains(rc.Command, "codex") {
+		t.Errorf("expected codex for polecat furiosa via town polecat_agents, got provider=%q command=%q", rc.Provider, rc.Command)
+	}
+}
+
+func TestBuildStartupCommand_PolecatAgents(t *testing.T) {
+	// Cannot use t.Parallel — uses t.Setenv
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+
+	// Create a fake codex binary
+	binDir := t.TempDir()
+	writeAgentStub(t, binDir, "codex")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	settings := NewRigSettings()
+	settings.PolecatAgents = map[string]string{"furiosa": "codex"}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), settings); err != nil {
+		t.Fatalf("saving settings: %v", err)
+	}
+
+	t.Run("polecat with polecat_agents entry uses codex", func(t *testing.T) {
+		envVars := map[string]string{
+			"GT_ROLE":    "polecat",
+			"GT_POLECAT": "furiosa",
+		}
+		cmd := BuildStartupCommand(envVars, rigPath, "")
+		if !strings.Contains(cmd, "codex") {
+			t.Errorf("expected codex for polecat furiosa, got: %q", cmd)
+		}
+	})
+
+	t.Run("polecat without polecat_agents entry gets sonnet default", func(t *testing.T) {
+		envVars := map[string]string{
+			"GT_ROLE":    "polecat",
+			"GT_POLECAT": "nux",
+		}
+		cmd := BuildStartupCommand(envVars, rigPath, "")
+		if !strings.Contains(cmd, "--model sonnet") {
+			t.Errorf("expected --model sonnet for polecat nux (not in polecat_agents), got: %q", cmd)
+		}
+	})
+
+	t.Run("polecat role without GT_POLECAT gets sonnet default", func(t *testing.T) {
+		envVars := map[string]string{
+			"GT_ROLE": "polecat",
+		}
+		cmd := BuildStartupCommand(envVars, rigPath, "")
+		if !strings.Contains(cmd, "--model sonnet") {
+			t.Errorf("expected --model sonnet when GT_POLECAT not set, got: %q", cmd)
+		}
+	})
+}
+
 func TestIsClaudeAgent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
