@@ -327,6 +327,121 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 	return true // Default: enabled
 }
 
+// KnownPatrols returns the list of all known patrol names.
+// The first group (refinery, witness, deacon, handler) default to enabled.
+// The rest are opt-in and default to disabled.
+func KnownPatrols() []string {
+	return []string{
+		// Default-enabled (core)
+		"refinery",
+		"witness",
+		"deacon",
+		"handler",
+		// Opt-in (default disabled)
+		"dolt_remotes",
+		"dolt_backup",
+		"jsonl_git_backup",
+		"wisp_reaper",
+		"doctor_dog",
+		"compactor_dog",
+		"checkpoint_dog",
+		"scheduled_maintenance",
+		"main_branch_test",
+	}
+}
+
+// IsKnownPatrol checks if the given name is a known patrol.
+func IsKnownPatrol(name string) bool {
+	for _, p := range KnownPatrols() {
+		if p == name {
+			return true
+		}
+	}
+	return false
+}
+
+// SetPatrolEnabled sets the enabled state of a patrol in the config.
+// If the config or patrols section is nil, it initializes them.
+// Returns an error if the patrol name is unknown.
+func SetPatrolEnabled(config *DaemonPatrolConfig, patrol string, enabled bool) error {
+	if !IsKnownPatrol(patrol) {
+		return fmt.Errorf("unknown patrol %q; known patrols: %v", patrol, KnownPatrols())
+	}
+
+	if config.Patrols == nil {
+		config.Patrols = &PatrolsConfig{}
+	}
+
+	switch patrol {
+	case "refinery":
+		if config.Patrols.Refinery == nil {
+			config.Patrols.Refinery = &PatrolConfig{}
+		}
+		config.Patrols.Refinery.Enabled = enabled
+	case "witness":
+		if config.Patrols.Witness == nil {
+			config.Patrols.Witness = &PatrolConfig{}
+		}
+		config.Patrols.Witness.Enabled = enabled
+	case "deacon":
+		if config.Patrols.Deacon == nil {
+			config.Patrols.Deacon = &PatrolConfig{}
+		}
+		config.Patrols.Deacon.Enabled = enabled
+	case "handler":
+		if config.Patrols.Handler == nil {
+			config.Patrols.Handler = &PatrolConfig{}
+		}
+		config.Patrols.Handler.Enabled = enabled
+	case "dolt_remotes":
+		if config.Patrols.DoltRemotes == nil {
+			config.Patrols.DoltRemotes = &DoltRemotesConfig{}
+		}
+		config.Patrols.DoltRemotes.Enabled = enabled
+	case "dolt_backup":
+		if config.Patrols.DoltBackup == nil {
+			config.Patrols.DoltBackup = &DoltBackupConfig{}
+		}
+		config.Patrols.DoltBackup.Enabled = enabled
+	case "jsonl_git_backup":
+		if config.Patrols.JsonlGitBackup == nil {
+			config.Patrols.JsonlGitBackup = &JsonlGitBackupConfig{}
+		}
+		config.Patrols.JsonlGitBackup.Enabled = enabled
+	case "wisp_reaper":
+		if config.Patrols.WispReaper == nil {
+			config.Patrols.WispReaper = &WispReaperConfig{}
+		}
+		config.Patrols.WispReaper.Enabled = enabled
+	case "doctor_dog":
+		if config.Patrols.DoctorDog == nil {
+			config.Patrols.DoctorDog = &DoctorDogConfig{}
+		}
+		config.Patrols.DoctorDog.Enabled = enabled
+	case "compactor_dog":
+		if config.Patrols.CompactorDog == nil {
+			config.Patrols.CompactorDog = &CompactorDogConfig{}
+		}
+		config.Patrols.CompactorDog.Enabled = enabled
+	case "checkpoint_dog":
+		if config.Patrols.CheckpointDog == nil {
+			config.Patrols.CheckpointDog = &CheckpointDogConfig{}
+		}
+		config.Patrols.CheckpointDog.Enabled = enabled
+	case "scheduled_maintenance":
+		if config.Patrols.ScheduledMaintenance == nil {
+			config.Patrols.ScheduledMaintenance = &ScheduledMaintenanceConfig{}
+		}
+		config.Patrols.ScheduledMaintenance.Enabled = enabled
+	case "main_branch_test":
+		if config.Patrols.MainBranchTest == nil {
+			config.Patrols.MainBranchTest = &MainBranchTestConfig{}
+		}
+		config.Patrols.MainBranchTest.Enabled = enabled
+	}
+	return nil
+}
+
 // GetPatrolRigs returns the list of rigs for a patrol, or nil if all rigs should be patrolled.
 func GetPatrolRigs(config *DaemonPatrolConfig, patrol string) []string {
 	if config == nil || config.Patrols == nil {
