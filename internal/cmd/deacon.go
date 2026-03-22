@@ -1171,10 +1171,8 @@ func updateAgentBeadState(townRoot, agent, state, _ string) { // reason unused b
 		return
 	}
 
-	// Use bd agent state command
-	cmd := exec.Command("bd", "agent", "state", beadID, state)
-	cmd.Dir = townRoot
-	_ = cmd.Run() // Best effort
+	bd := beads.New(townRoot)
+	_ = bd.UpdateAgentState(beadID, state) // Best effort
 }
 
 // runDeaconStaleHooks finds and unhooks stale hooked beads.
