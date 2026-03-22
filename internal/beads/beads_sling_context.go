@@ -1,9 +1,12 @@
 package beads
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	beadsmod "github.com/steveyegge/beads"
 
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
@@ -39,37 +42,37 @@ func (b *Beads) CreateSlingContext(workBeadTitle, workBeadID string, fields *cap
 
 	description := FormatSlingContextDescription(fields)
 
-	args := []string{"create", "--json",
-		"--ephemeral",
-		"--title=" + title,
-		"--description=" + description,
-		"--type=task",
-		"--labels=" + capacity.LabelSlingContext,
-	}
-
-	if actor := b.getActor(); actor != "" {
-		args = append(args, "--actor="+actor)
-	}
-
-	out, err := b.run(args...)
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("creating sling context: %w", err)
 	}
+	actor := b.getActor()
 
-	var issue Issue
-	if err := json.Unmarshal(out, &issue); err != nil {
-		return nil, fmt.Errorf("parsing bd create output: %w", err)
+	mi := &beadsmod.Issue{
+		Title:       title,
+		Description: description,
+		Ephemeral:   true,
+		Labels:      []string{capacity.LabelSlingContext},
 	}
+	if err := store.CreateIssue(ctx, mi, actor); err != nil {
+		return nil, fmt.Errorf("creating sling context: %w", err)
+	}
+
+	issue := issueFromModule(mi)
 
 	// Add tracks dependency: context bead → work bead
-	_, depErr := b.run("dep", "add", issue.ID, workBeadID, "--type=tracks")
-	if depErr != nil {
+	dep := &beadsmod.Dependency{
+		IssueID:     mi.ID,
+		DependsOnID: workBeadID,
+		Type:        "tracks",
+	}
+	if depErr := store.AddDependency(ctx, dep, actor); depErr != nil {
 		// Non-fatal: the context bead was created, just missing the dep link.
-		// This can happen if the work bead is in a different DB and external refs aren't set up.
-		fmt.Printf("Warning: could not add tracks dep %s → %s: %v\n", issue.ID, workBeadID, depErr)
+		fmt.Printf("Warning: could not add tracks dep %s → %s: %v\n", mi.ID, workBeadID, depErr)
 	}
 
-	return &issue, nil
+	return issue, nil
 }
 
 // FindOpenSlingContext finds an open sling context for the given work bead ID.
@@ -92,35 +95,38 @@ func (b *Beads) FindOpenSlingContext(workBeadID string) (*Issue, *capacity.Sling
 
 // ListOpenSlingContexts returns all open sling context beads.
 func (b *Beads) ListOpenSlingContexts() ([]*Issue, error) {
-	out, err := b.run("list",
-		"--label="+capacity.LabelSlingContext,
-		"--status=open",
-		"--json",
-		"--limit=0",
-	)
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Handle empty output or non-JSON responses.
-	// bd list --json may return plain text like "No issues found." instead
-	// of an empty JSON array when there are no results.
-	if len(out) == 0 || !isJSONBytes(out) {
-		return nil, nil
+	openStatus := beadsmod.StatusOpen
+	trueVal := true
+	filter := beadsmod.IssueFilter{
+		Status:    &openStatus,
+		Labels:    []string{capacity.LabelSlingContext},
+		Ephemeral: &trueVal,
 	}
 
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing sling context list: %w", err)
+	mis, err := store.SearchIssues(ctx, "", filter)
+	if err != nil {
+		return nil, fmt.Errorf("listing sling contexts: %w", err)
 	}
 
-	return issues, nil
+	return issuesFromModule(mis), nil
 }
 
 // CloseSlingContext closes a sling context bead with a reason.
 // Idempotent: suppresses "already closed" errors so retries are safe.
 func (b *Beads) CloseSlingContext(contextID, reason string) error {
-	_, err := b.run("close", contextID, "--reason="+reason)
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
+	if err != nil {
+		return err
+	}
+	actor := b.getActor()
+	err = store.CloseIssue(ctx, contextID, reason, actor, "")
 	if err != nil && strings.Contains(err.Error(), "already closed") {
 		return nil // Idempotent — already in desired state
 	}

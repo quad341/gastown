@@ -2,9 +2,11 @@
 package beads
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"strings"
+
+	beadsmod "github.com/steveyegge/beads"
 )
 
 // MergeSlotStatus represents the result of checking a merge slot.
@@ -16,44 +18,74 @@ type MergeSlotStatus struct {
 	Error     string   `json:"error,omitempty"`
 }
 
+// mergeSlotID returns the canonical merge-slot bead ID for this database.
+// The ID is <issue_prefix>-merge-slot (e.g. "gt-merge-slot").
+func (b *Beads) mergeSlotID(ctx context.Context, store beadsmod.Storage) (string, error) {
+	prefix, err := store.GetConfig(ctx, "issue_prefix")
+	if err != nil || prefix == "" {
+		return "", fmt.Errorf("getting issue_prefix config: %w", err)
+	}
+	return prefix + "-merge-slot", nil
+}
+
 // MergeSlotCreate creates the merge slot bead for the current rig.
 // The slot is used for serialized conflict resolution in the merge queue.
 // Returns the slot ID if successful.
 func (b *Beads) MergeSlotCreate() (string, error) {
-	out, err := b.run("merge-slot", "create", "--json")
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
 	if err != nil {
 		return "", fmt.Errorf("creating merge slot: %w", err)
 	}
 
-	var result struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return "", fmt.Errorf("parsing merge-slot create output: %w", err)
+	slotID, err := b.mergeSlotID(ctx, store)
+	if err != nil {
+		return "", fmt.Errorf("creating merge slot: %w", err)
 	}
 
-	return result.ID, nil
+	actor := b.getActor()
+	mi := &beadsmod.Issue{
+		ID:    slotID,
+		Title: "Merge Slot",
+	}
+	mi.Labels = []string{"gt:slot"}
+
+	if err := store.CreateIssue(ctx, mi, actor); err != nil {
+		return "", fmt.Errorf("creating merge slot: %w", err)
+	}
+
+	return mi.ID, nil
 }
 
 // MergeSlotCheck checks the availability of the merge slot.
 // Returns the current status including holder and waiters if held.
 func (b *Beads) MergeSlotCheck() (*MergeSlotStatus, error) {
-	out, err := b.run("merge-slot", "check", "--json")
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
 	if err != nil {
-		// Check if slot doesn't exist
+		return nil, fmt.Errorf("checking merge slot: %w", err)
+	}
+
+	slotID, err := b.mergeSlotID(ctx, store)
+	if err != nil {
+		return &MergeSlotStatus{Error: "not found"}, nil
+	}
+
+	mi, err := store.GetIssue(ctx, slotID)
+	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return &MergeSlotStatus{Error: "not found"}, nil
 		}
 		return nil, fmt.Errorf("checking merge slot: %w", err)
 	}
 
-	var status MergeSlotStatus
-	if err := json.Unmarshal(out, &status); err != nil {
-		return nil, fmt.Errorf("parsing merge-slot check output: %w", err)
+	status := &MergeSlotStatus{
+		ID:      mi.ID,
+		Holder:  mi.Holder,
+		Waiters: mi.Waiters,
 	}
-
-	return &status, nil
+	status.Available = (mi.Holder == "")
+	return status, nil
 }
 
 // MergeSlotAcquire attempts to acquire the merge slot for exclusive access.
@@ -61,58 +93,108 @@ func (b *Beads) MergeSlotCheck() (*MergeSlotStatus, error) {
 // If addWaiter is true and the slot is held, the requester is added to the waiters queue.
 // Returns the acquisition result.
 func (b *Beads) MergeSlotAcquire(holder string, addWaiter bool) (*MergeSlotStatus, error) {
-	args := []string{"merge-slot", "acquire", "--json"}
-	if holder != "" {
-		args = append(args, "--holder="+holder)
-	}
-	if addWaiter {
-		args = append(args, "--wait")
-	}
-
-	out, err := b.run(args...)
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
 	if err != nil {
-		// Parse the output even on error - it may contain useful info
-		var status MergeSlotStatus
-		if jsonErr := json.Unmarshal(out, &status); jsonErr == nil {
-			return &status, nil
-		}
 		return nil, fmt.Errorf("acquiring merge slot: %w", err)
 	}
 
-	var status MergeSlotStatus
-	if err := json.Unmarshal(out, &status); err != nil {
-		return nil, fmt.Errorf("parsing merge-slot acquire output: %w", err)
+	actor := b.getActor()
+	if holder == "" {
+		holder = actor
 	}
 
-	return &status, nil
+	slotID, err := b.mergeSlotID(ctx, store)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring merge slot: %w", err)
+	}
+
+	mi, err := store.GetIssue(ctx, slotID)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring merge slot: %w", err)
+	}
+
+	// Slot is available — acquire it
+	if mi.Holder == "" {
+		if updateErr := store.UpdateIssue(ctx, slotID, map[string]interface{}{
+			"holder": holder,
+		}, actor); updateErr != nil {
+			return nil, fmt.Errorf("acquiring merge slot: %w", updateErr)
+		}
+		return &MergeSlotStatus{
+			ID:        slotID,
+			Available: false,
+			Holder:    holder,
+		}, nil
+	}
+
+	// Slot is held — optionally add to waiters queue
+	if addWaiter && holder != "" {
+		waiters := mi.Waiters
+		// Only add if not already in waiters
+		alreadyWaiting := false
+		for _, w := range waiters {
+			if w == holder {
+				alreadyWaiting = true
+				break
+			}
+		}
+		if !alreadyWaiting {
+			waiters = append(waiters, holder)
+			_ = store.UpdateIssue(ctx, slotID, map[string]interface{}{
+				"waiters": waiters,
+			}, actor)
+			mi.Waiters = waiters
+		}
+	}
+
+	return &MergeSlotStatus{
+		ID:        slotID,
+		Available: false,
+		Holder:    mi.Holder,
+		Waiters:   mi.Waiters,
+	}, nil
 }
 
 // MergeSlotRelease releases the merge slot after conflict resolution completes.
 // If holder is provided, it verifies the slot is held by that holder before releasing.
 func (b *Beads) MergeSlotRelease(holder string) error {
-	args := []string{"merge-slot", "release", "--json"}
-	if holder != "" {
-		args = append(args, "--holder="+holder)
-	}
-
-	out, err := b.run(args...)
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
 	if err != nil {
 		return fmt.Errorf("releasing merge slot: %w", err)
 	}
 
-	var result struct {
-		Released bool   `json:"released"`
-		Error    string `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return fmt.Errorf("parsing merge-slot release output: %w", err)
+	actor := b.getActor()
+	if holder == "" {
+		holder = actor
 	}
 
-	if !result.Released && result.Error != "" {
-		return fmt.Errorf("slot release failed: %s", result.Error)
+	slotID, err := b.mergeSlotID(ctx, store)
+	if err != nil {
+		return fmt.Errorf("releasing merge slot: %w", err)
 	}
 
-	return nil
+	mi, err := store.GetIssue(ctx, slotID)
+	if err != nil {
+		return fmt.Errorf("releasing merge slot: %w", err)
+	}
+
+	// Verify holder if specified
+	if holder != "" && mi.Holder != holder {
+		return fmt.Errorf("slot release failed: slot held by %q, not %q", mi.Holder, holder)
+	}
+
+	// Promote next waiter or clear holder
+	updates := map[string]interface{}{"holder": ""}
+	var newWaiters []string
+	if len(mi.Waiters) > 0 {
+		updates["holder"] = mi.Waiters[0]
+		newWaiters = mi.Waiters[1:]
+	}
+	updates["waiters"] = newWaiters
+
+	return store.UpdateIssue(ctx, slotID, updates, actor)
 }
 
 // MergeSlotEnsureExists creates the merge slot if it doesn't exist.

@@ -2,9 +2,12 @@
 package beads
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	beadsmod "github.com/steveyegge/beads"
 
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -49,13 +52,14 @@ type DelegationTerms struct {
 	CreditShare int `json:"credit_share,omitempty"`
 }
 
+// delegationMetadataKey is the key used to store delegation data in issue Metadata.
+// bd slot was removed in v0.62; delegation is now stored in the metadata JSON field.
+const delegationMetadataKey = "delegated_from"
+
 // AddDelegation creates a delegation relationship from parent to child work unit.
 // The delegation tracks who delegated (delegatedBy) and who received (delegatedTo),
 // along with optional terms. Delegations enable credit cascade - when child work
 // is completed, credit flows up to the parent work unit and its delegator.
-//
-// Note: This is stored as metadata on the child issue until bd CLI has native
-// delegation support. Once bd supports `bd delegate add`, this will be updated.
 func (b *Beads) AddDelegation(d *Delegation) error {
 	if d.Parent == "" || d.Child == "" {
 		return fmt.Errorf("delegation requires both parent and child work unit IDs")
@@ -64,16 +68,35 @@ func (b *Beads) AddDelegation(d *Delegation) error {
 		return fmt.Errorf("delegation requires both delegated_by and delegated_to entities")
 	}
 
-	// Store delegation as JSON in the child issue's delegated_from slot
 	delegationJSON, err := json.Marshal(d)
 	if err != nil {
 		return fmt.Errorf("marshaling delegation: %w", err)
 	}
 
-	// Set the delegated_from slot on the child issue
-	_, err = b.run("slot", "set", d.Child, "delegated_from", string(delegationJSON))
+	// Store delegation in child issue's metadata field under delegated_from key.
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
 	if err != nil {
-		return fmt.Errorf("setting delegation slot: %w", err)
+		return fmt.Errorf("setting delegation: %w", err)
+	}
+	actor := b.getActor()
+
+	// Build metadata: merge with existing metadata if present
+	existing, _ := store.GetIssue(ctx, d.Child)
+	meta := make(map[string]json.RawMessage)
+	if existing != nil && len(existing.Metadata) > 0 {
+		_ = json.Unmarshal(existing.Metadata, &meta)
+	}
+	meta[delegationMetadataKey] = delegationJSON
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshaling delegation metadata: %w", err)
+	}
+
+	if err := store.UpdateIssue(ctx, d.Child, map[string]interface{}{
+		"metadata": string(metaBytes),
+	}, actor); err != nil {
+		return fmt.Errorf("setting delegation metadata: %w", err)
 	}
 
 	// Also add a dependency so child blocks parent (work must complete before parent can close)
@@ -87,10 +110,25 @@ func (b *Beads) AddDelegation(d *Delegation) error {
 
 // RemoveDelegation removes a delegation relationship.
 func (b *Beads) RemoveDelegation(parent, child string) error {
-	// Clear the delegated_from slot on the child
-	_, err := b.run("slot", "clear", child, "delegated_from")
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
 	if err != nil {
-		return fmt.Errorf("clearing delegation slot: %w", err)
+		return fmt.Errorf("removing delegation: %w", err)
+	}
+	actor := b.getActor()
+
+	// Remove delegated_from key from child issue's metadata
+	existing, getErr := store.GetIssue(ctx, child)
+	if getErr == nil && existing != nil {
+		meta := make(map[string]json.RawMessage)
+		if len(existing.Metadata) > 0 {
+			_ = json.Unmarshal(existing.Metadata, &meta)
+		}
+		delete(meta, delegationMetadataKey)
+		metaBytes, _ := json.Marshal(meta)
+		_ = store.UpdateIssue(ctx, child, map[string]interface{}{
+			"metadata": string(metaBytes),
+		}, actor)
 	}
 
 	// Also remove the blocking dependency
@@ -105,28 +143,37 @@ func (b *Beads) RemoveDelegation(parent, child string) error {
 // GetDelegation retrieves the delegation information for a child work unit.
 // Returns nil if the issue has no delegation.
 func (b *Beads) GetDelegation(child string) (*Delegation, error) {
-	// Verify the issue exists first
-	if _, err := b.Show(child); err != nil {
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting delegation: %w", err)
+	}
+
+	mi, err := store.GetIssue(ctx, child)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, fmt.Errorf("getting issue: %w", ErrNotFound)
+		}
 		return nil, fmt.Errorf("getting issue: %w", err)
 	}
 
-	// Get delegation from the slot
-	out, err := b.run("slot", "get", child, "delegated_from")
-	if err != nil {
-		// No delegation slot means no delegation
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no slot") {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("getting delegation slot: %w", err)
+	if len(mi.Metadata) == 0 {
+		return nil, nil
 	}
 
-	slotValue := strings.TrimSpace(string(out))
-	if slotValue == "" || slotValue == "null" {
+	// Extract delegated_from key from metadata
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(mi.Metadata, &meta); err != nil {
+		return nil, nil // Not a map — no delegation
+	}
+
+	raw, ok := meta[delegationMetadataKey]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
 
 	var delegation Delegation
-	if err := json.Unmarshal([]byte(slotValue), &delegation); err != nil {
+	if err := json.Unmarshal(raw, &delegation); err != nil {
 		return nil, fmt.Errorf("parsing delegation: %w", err)
 	}
 
@@ -134,28 +181,37 @@ func (b *Beads) GetDelegation(child string) (*Delegation, error) {
 }
 
 // ListDelegationsFrom returns all delegations from a parent work unit.
-// This searches for issues that have delegated_from pointing to the parent.
+// This searches for issues that have delegated_from in their metadata pointing to the parent.
 func (b *Beads) ListDelegationsFrom(parent string) ([]*Delegation, error) {
-	// List all issues that depend on this parent (delegated work blocks parent)
-	issues, err := b.List(ListOptions{Status: "all"})
+	ctx := context.Background()
+	store, err := b.openStore(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing delegations: %w", err)
+	}
+
+	// Use HasMetadataKey filter to find only issues that have delegation metadata
+	mis, err := store.SearchIssues(ctx, "", beadsmod.IssueFilter{
+		HasMetadataKey: delegationMetadataKey,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listing issues: %w", err)
 	}
 
-	// Read delegation slots directly instead of calling GetDelegation per issue,
-	// which would redundantly call Show on each issue (already listed above).
 	var delegations []*Delegation
-	for _, issue := range issues {
-		out, err := b.run("slot", "get", issue.ID, "delegated_from")
-		if err != nil {
-			continue // No delegation slot or error — skip
+	for _, mi := range mis {
+		if len(mi.Metadata) == 0 {
+			continue
 		}
-		slotValue := strings.TrimSpace(string(out))
-		if slotValue == "" || slotValue == "null" {
+		var meta map[string]json.RawMessage
+		if err := json.Unmarshal(mi.Metadata, &meta); err != nil {
+			continue
+		}
+		raw, ok := meta[delegationMetadataKey]
+		if !ok || len(raw) == 0 {
 			continue
 		}
 		var d Delegation
-		if err := json.Unmarshal([]byte(slotValue), &d); err != nil {
+		if err := json.Unmarshal(raw, &d); err != nil {
 			continue
 		}
 		if d.Parent == parent {

@@ -257,9 +257,12 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	// The fallback query (status=hooked + assignee) is unreliable for
 	// cross-database scenarios. Restoring per hq-gfg.
 	if fields != nil && fields.HookBead != "" {
-		if _, slotErr := b.run("slot", "set", id, "hook", fields.HookBead); slotErr != nil {
-			// Non-fatal: fallback query may still find the work bead
+		ctx := context.Background()
+		if store, storeErr := b.openStore(ctx); storeErr == nil {
+			actor := b.getActor()
+			_ = store.UpdateIssue(ctx, id, map[string]interface{}{"hook_bead": fields.HookBead}, actor)
 		}
+		// Non-fatal: fallback query (status=hooked + assignee) may still find the work bead
 	}
 
 	return &issue, nil
@@ -416,19 +419,19 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 }
 
 // UpdateAgentState updates the agent_state field in an agent bead.
-// Uses `bd agent state` command for the database column directly.
+// Uses the Go module storage API directly (bd agent state was removed in v0.62).
 func (b *Beads) UpdateAgentState(id string, state string) (retErr error) {
-	defer func() { telemetry.RecordAgentStateChange(context.Background(), id, state, nil, retErr) }()
-	// Update agent state using bd agent state command
-	// Use runWithRouting so bd can resolve cross-prefix agent beads (e.g., wa-*
-	// agent beads from hq context) via routes.jsonl instead of BEADS_DIR.
-	_, err := b.runWithRouting("agent", "state", id, state)
+	ctx := context.Background()
+	defer func() { telemetry.RecordAgentStateChange(ctx, id, state, nil, retErr) }()
+
+	store, err := b.openStore(ctx)
 	if err != nil {
 		return fmt.Errorf("updating agent state: %w", err)
 	}
-
-	// Hook slot no longer maintained (hq-l6mm5) — removed hook_bead parameter.
-
+	actor := b.getActor()
+	if err := store.UpdateIssue(ctx, id, map[string]interface{}{"agent_state": state}, actor); err != nil {
+		return fmt.Errorf("updating agent state: %w", err)
+	}
 	return nil
 }
 
