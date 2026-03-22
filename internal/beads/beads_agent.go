@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofrs/flock"
 
+	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/telemetry"
 )
@@ -252,15 +253,10 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 
 	// Note: role slot no longer set - role definitions are config-based
 
-	// Set hook_bead slot so gt mol status can find hooked work via the
-	// agent bead's JSON field (primary lookup path in lookupHookedWork).
-	// The fallback query (status=hooked + assignee) is unreliable for
-	// cross-database scenarios. Restoring per hq-gfg.
-	if fields != nil && fields.HookBead != "" {
-		if _, slotErr := b.run("slot", "set", id, "hook", fields.HookBead); slotErr != nil {
-			// Non-fatal: fallback query may still find the work bead
-		}
-	}
+	// hook_bead is included in the description text via FormatAgentDescription.
+	// The bd v0.62 Go module no longer exposes the hook_bead database column via
+	// UpdateIssue, so we rely on the description text for hook tracking.
+	// lookupHookedWork falls back to status=hooked + assignee query (hq-gfg).
 
 	return &issue, nil
 }
@@ -415,15 +411,38 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 	return nil
 }
 
-// UpdateAgentState updates the agent_state field in an agent bead.
-// Uses `bd agent state` command for the database column directly.
+// UpdateAgentState updates the agent_state field in an agent bead's description.
+// The agent_state is stored in the description text (via ParseAgentFields /
+// FormatAgentDescription), since the bd v0.62 Go module no longer exposes the
+// agent_state database column via UpdateIssue.
+//
+// Opens a store routed to the correct database for cross-prefix agent beads
+// (e.g., wa-* agent beads from hq context) via routes.jsonl.
 func (b *Beads) UpdateAgentState(id string, state string) (retErr error) {
-	defer func() { telemetry.RecordAgentStateChange(context.Background(), id, state, nil, retErr) }()
-	// Update agent state using bd agent state command
-	// Use runWithRouting so bd can resolve cross-prefix agent beads (e.g., wa-*
-	// agent beads from hq context) via routes.jsonl instead of BEADS_DIR.
-	_, err := b.runWithRouting("agent", "state", id, state)
+	ctx := context.Background()
+	defer func() { telemetry.RecordAgentStateChange(ctx, id, state, nil, retErr) }()
+
+	// Resolve the correct beads directory for this agent bead ID (handles cross-prefix routing).
+	beadsDir := ResolveRoutingTarget(b.getTownRoot(), id, b.getResolvedBeadsDir())
+	store, err := beadsdk.OpenFromConfig(ctx, beadsDir)
 	if err != nil {
+		return fmt.Errorf("updating agent state: opening store: %w", err)
+	}
+	defer store.Close()
+
+	// Read current issue, update agent_state in description, write back.
+	issue, err := store.GetIssue(ctx, id)
+	if err != nil {
+		return fmt.Errorf("updating agent state: getting issue: %w", err)
+	}
+
+	fields := ParseAgentFields(issue.Description)
+	fields.AgentState = state
+	newDesc := FormatAgentDescription(issue.Title, fields)
+
+	if err := store.UpdateIssue(ctx, id, map[string]interface{}{
+		"description": newDesc,
+	}, b.getActor()); err != nil {
 		return fmt.Errorf("updating agent state: %w", err)
 	}
 

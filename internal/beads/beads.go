@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/telemetry"
 )
@@ -308,6 +309,12 @@ type Beads struct {
 	// Populated on first call to getTownRoot() to avoid filesystem walk on every operation.
 	townRoot     string
 	townRootOnce sync.Once
+
+	// Lazy-initialized local beads storage, used by storage module operations
+	// that replace removed bd CLI commands (bd slot, bd agent state, bd merge-slot).
+	localStore     beadsdk.Storage
+	localStoreOnce sync.Once
+	localStoreErr  error
 }
 
 // New creates a new Beads wrapper for the given directory.
@@ -364,6 +371,18 @@ func (b *Beads) getResolvedBeadsDir() string {
 		return b.beadsDir
 	}
 	return ResolveBeadsDir(b.workDir)
+}
+
+// getLocalStore returns the lazily-initialized storage for the local beads directory.
+// This is used by storage module operations that replace removed bd CLI subcommands
+// (bd slot, bd merge-slot). The store is opened once and cached for the lifetime
+// of the Beads instance. Thread-safe via sync.Once.
+func (b *Beads) getLocalStore() (beadsdk.Storage, error) {
+	b.localStoreOnce.Do(func() {
+		beadsDir := b.getResolvedBeadsDir()
+		b.localStore, b.localStoreErr = beadsdk.OpenFromConfig(context.Background(), beadsDir)
+	})
+	return b.localStore, b.localStoreErr
 }
 
 // Init initializes a new beads database in the working directory.
