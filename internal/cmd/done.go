@@ -1021,6 +1021,7 @@ notifyWitness:
 			Branch:         branch,
 			HookBead:       issueID,
 			MRFailed:       mrFailed,
+			PushFailed:     pushFailed,
 			CompletionTime: time.Now().UTC().Format(time.RFC3339),
 		}
 		if err := completionBd.UpdateAgentCompletion(agentBeadID, meta); err != nil {
