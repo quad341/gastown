@@ -738,9 +738,9 @@ func outputAutonomousDirective(ctx RoleContext, hookedBead *beads.Issue, hasMole
 	if hasMolecule {
 		fmt.Println("2. This bead has an ATTACHED MOLECULE (formula workflow)")
 		fmt.Println("3. Work through molecule steps in order - see CURRENT STEP below")
-		fmt.Println("4. Close each step with `bd close <step-id>`, then check `bd mol current` for next step")
+		fmt.Println("4. Close each step with `gt bd close <step-id>`, then check `gt bd mol current` for next step")
 	} else {
-		fmt.Printf("2. Then IMMEDIATELY run: `bd show %s`\n", hookedBead.ID)
+		fmt.Printf("2. Then IMMEDIATELY run: `gt bd show %s`\n", hookedBead.ID)
 		fmt.Println("3. Begin execution - no waiting for user input")
 	}
 
@@ -1209,7 +1209,7 @@ func checkPendingEscalations(ctx RoleContext) {
 	}
 	fmt.Println()
 
-	fmt.Println("**Action required:** Review escalations with `bd list --tag=escalation`")
-	fmt.Println("Close resolved ones with `bd close <id> --reason \"resolution\"`")
+	fmt.Println("**Action required:** Review escalations with `gt bd list --tag=escalation`")
+	fmt.Println("Close resolved ones with `gt bd close <id> --reason \"resolution\"`")
 	fmt.Println()
 }
