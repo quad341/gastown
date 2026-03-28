@@ -191,6 +191,11 @@ type Issue struct {
 	// Detailed dependency info from show output
 	Dependencies []IssueDep `json:"dependencies,omitempty"`
 	Dependents   []IssueDep `json:"dependents,omitempty"`
+
+	// Arbitrary metadata blob (JSON object). Used for extension points such as
+	// delegation state (delegated_from key) and merge-slot state (holder/waiters).
+	// Populated by both bd show --json and the in-process store path.
+	Metadata json.RawMessage `json:"metadata,omitempty"`
 }
 
 // HasLabel checks if an issue has a specific label.

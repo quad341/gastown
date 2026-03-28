@@ -8,6 +8,7 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -104,6 +105,7 @@ func sdkIssueToIssue(si *beadsdk.Issue) *Issue {
 		Labels:             si.Labels,
 		Ephemeral:          si.Ephemeral,
 		AcceptanceCriteria: si.AcceptanceCriteria,
+		Metadata:           si.Metadata,
 	}
 
 	if si.ClosedAt != nil {
@@ -521,4 +523,103 @@ func (b *Beads) storeGetLabels(id string) ([]string, error) {
 	defer cancel()
 
 	return b.store.GetLabels(ctx, id)
+}
+
+// storeUpdateAgentState implements UpdateAgentState via label management.
+// bd set-state uses the convention dimension:value as labels. This mirrors that
+// behavior: removes any existing agent_state:* label and adds agent_state:<state>.
+func (b *Beads) storeUpdateAgentState(id, state string) error {
+	ctx, cancel := storeCtx()
+	defer cancel()
+
+	labels, err := b.store.GetLabels(ctx, id)
+	if err != nil {
+		return fmt.Errorf("getting labels for agent state update: %w", err)
+	}
+
+	actor := b.getActor()
+	prefix := "agent_state:"
+	newLabel := prefix + state
+
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) && label != newLabel {
+			// Ignore remove errors: non-fatal, the add below is the important operation.
+			_ = b.store.RemoveLabel(ctx, id, label, actor)
+		}
+	}
+
+	return b.store.AddLabel(ctx, id, newLabel, actor)
+}
+
+// storeDelegationSet stores delegation data in the issue's metadata under the
+// "delegated_from" key. Merges with any existing metadata to avoid clobbering
+// other keys.
+func (b *Beads) storeDelegationSet(childID string, d *Delegation) error {
+	ctx, cancel := storeCtx()
+	defer cancel()
+
+	actor := b.getActor()
+
+	// Fetch current metadata to merge into.
+	si, err := b.store.GetIssue(ctx, childID)
+	if err != nil {
+		return fmt.Errorf("fetching issue for delegation set: %w", err)
+	}
+
+	meta, err := mergeMetadataKey(si.Metadata, "delegated_from", d)
+	if err != nil {
+		return fmt.Errorf("building delegation metadata: %w", err)
+	}
+
+	return b.store.UpdateIssue(ctx, childID, map[string]interface{}{"metadata": json.RawMessage(meta)}, actor)
+}
+
+// storeDelegationClear removes the "delegated_from" key from the issue's metadata.
+func (b *Beads) storeDelegationClear(childID string) error {
+	ctx, cancel := storeCtx()
+	defer cancel()
+
+	actor := b.getActor()
+
+	si, err := b.store.GetIssue(ctx, childID)
+	if err != nil {
+		return fmt.Errorf("fetching issue for delegation clear: %w", err)
+	}
+
+	meta, err := deleteMetadataKey(si.Metadata, "delegated_from")
+	if err != nil {
+		return fmt.Errorf("clearing delegation metadata: %w", err)
+	}
+
+	return b.store.UpdateIssue(ctx, childID, map[string]interface{}{"metadata": json.RawMessage(meta)}, actor)
+}
+
+// mergeMetadataKey sets a key in a JSON metadata blob, preserving other keys.
+func mergeMetadataKey(existing json.RawMessage, key string, value interface{}) (json.RawMessage, error) {
+	m := make(map[string]json.RawMessage)
+	if len(existing) > 0 {
+		if err := json.Unmarshal(existing, &m); err != nil {
+			// If existing metadata is malformed, start fresh.
+			m = make(map[string]json.RawMessage)
+		}
+	}
+	v, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	m[key] = v
+	return json.Marshal(m)
+}
+
+// deleteMetadataKey removes a key from a JSON metadata blob.
+func deleteMetadataKey(existing json.RawMessage, key string) (json.RawMessage, error) {
+	if len(existing) == 0 {
+		return json.RawMessage("{}"), nil
+	}
+	m := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(existing, &m); err != nil {
+		return json.RawMessage("{}"), nil
+	}
+	delete(m, key)
+	return json.Marshal(m)
 }
